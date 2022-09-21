@@ -1,0 +1,7 @@
+1.RuntimeError: input image (T: 2 H: 28 W: 38) smaller than kernel size (kT: 8 kH: 1 kW: 1)
+  看情况,如果是时间步太小就把T调大一些，具体就是把num_frames调大一些；
+2.py:6: UserWarning: The 'torchvision.transforms._functional_video' module is deprecated since 0.12 and will be removed in 0.14. Please use the 'torchvision.transforms.functional' module instead.
+  warnings.warn(
+  不用管：pytorchvideo版本原因
+3.cv2.error: OpenCV(4.6.0) D:\a\opencv-python\opencv-python\opencv\modules\core\src\alloc.cpp:73: error: (-4:Insufficient memory) Failed to allocate 7569408 bytes in function 'cv::OutOfMemoryError'
+  内存问题，调小num_frames或者把cropsize与input image size调小一些;
