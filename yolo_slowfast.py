@@ -1,6 +1,6 @@
 import numpy as np
 import os,cv2,time,torch,random,pytorchvideo,warnings,argparse,math
-# warnings.filterwarnings("ignore",category=UserWarning)
+warnings.filterwarnings("ignore",category=UserWarning)
 
 from pytorchvideo.transforms.functional import (
     uniform_temporal_subsample,
@@ -17,8 +17,8 @@ def tensor_to_numpy(tensor):
     return img
 
 def ava_inference_transform(clip, boxes,
-    num_frames = 32, #if using slowfast_r50_detection, change this to 32, 4 for slow
-    crop_size = 448,
+    num_frames = 32, #if using slowfast_r50_detection, change this to 32, 4 for slow 
+    crop_size = 640, 
     data_mean = [0.45, 0.45, 0.45], 
     data_std = [0.225, 0.225, 0.225],
     slow_fast_alpha = 4, #if using slowfast_r50_detection, change this to 4, None for slow
@@ -75,41 +75,47 @@ def save_yolopreds_tovideo(yolo_preds,id_to_ava_labels,color_map,output_video):
         output_video.write(im.astype(np.uint8))
 
 def main(config):
-    model = torch.hub.load(r'D:\PythonCode\ultralytics_yolov5_master', 'yolov5l6',source='local')   # 这里改成yolov5的目录
+    ####################################################################################################################
+    # 设置检测model的参数包括了前向推理的置信度、iou的阈值，检测的最大bbox数模
+    model = torch.hub.load(r'D:\PythonCode\ultralytics_yolov5_master', 'yolov5l6',source='local')
     model.conf = config.conf
     model.iou = config.iou
-    model.max_det = 100
+    model.max_det = 200
     if config.classes:
         model.classes = config.classes
+    ####################################################################################################################
     device = config.device
-    imsize = config.imsize
-    slow_fast_model = slowfast_r50_detection(True).eval().to(device)    # 目前torchhub下载的权重我暂时还想不到随机路径读入的方法
-    video_model = slow_fast_model.eval().to(device)
-    deepsort_tracker = DeepSort(r'D:\PythonCode\yolo_slowfast-master\deep_sort\deep_sort\deep\checkpoint\ckpt.t7')  # 改成ckpt权值存放路径
+    imsize = config.imsize  # 配置输入的图片size以及device
+    video_model = slowfast_r50_detection(True).eval().to(device)
+    ####################################################################################################################
+    # 实例化deepsort目标跟踪器
+    deepsort_tracker = DeepSort(r"D:\PythonCode\yolo_slowfast-master/deep_sort/deep_sort/deep/checkpoint/ckpt.t7")
     ava_labelnames,_ = AvaLabeledVideoFramePaths.read_label_map("selfutils/temp.pbtxt")
-    coco_color_map = [[random.randint(0, 255) for _ in range(3)] for _ in range(80)]
-
+    coco_color_map = [[random.randint(0, 255) for _ in range(3)] for _ in range(80)]    # 绘图板
     vide_save_path = config.output
     video=cv2.VideoCapture(config.input)
     width,height = int(video.get(3)),int(video.get(4))
     video.release()
     outputvideo = cv2.VideoWriter(vide_save_path,cv2.VideoWriter_fourcc(*'mp4v'), 25, (width,height))
     print("processing...")
-    
+
     video = pytorchvideo.data.encoded_video.EncodedVideo.from_path(config.input)
     a=time.time()
+    ####################################################################################################################
+    # 完成每一个clip目标检测
     for i in range(0,math.ceil(video.duration),1):
-        video_clips=video.get_clip(i, i+1-0.04)
-        video_clips=video_clips['video']
+        video_clips=video.get_clip(i, i+1-0.04) # 读取每一个视频clip
+        video_clips=video_clips['video']    # 返回视频和音频（不需要）
         if video_clips is None:
             continue
         img_num=video_clips.shape[1]
-        imgs=[]
+        imgs=[] # 读取一个clip的所有视频帧
         for j in range(img_num):
             imgs.append(tensor_to_numpy(video_clips[:,j,:,:]))
         yolo_preds=model(imgs, size=imsize)
         yolo_preds.files=[f"img_{i*25+k}.jpg" for k in range(img_num)]
-
+    ####################################################################################################################
+    # 完成每一个clip目标跟踪（目标跟踪暂不了解）
         print(i,video_clips.shape,img_num)
         deepsort_outputs=[]
         for j in range(len(yolo_preds.pred)):
@@ -117,33 +123,37 @@ def main(config):
             if len(temp)==0:
                 temp=np.ones((0,8))
             deepsort_outputs.append(temp.astype(np.float32))
-        yolo_preds.pred=deepsort_outputs
+        yolo_preds.pred=deepsort_outputs    # 把目标检测结果结合目标跟踪预测结果进行更新
         id_to_ava_labels={}
+        # print(yolo_preds.pred[img_num//2].shape)
+    ####################################################################################################################
+    # 开始转换为ava数据集格式并进行slowfast前向推理
         if yolo_preds.pred[img_num//2].shape[0]:
-            inputs,inp_boxes,_=ava_inference_transform(video_clips,yolo_preds.pred[img_num//2][:,0:4],crop_size=imsize)
+            inputs,inp_boxes,_=ava_inference_transform(video_clips,yolo_preds.pred[img_num//2][:,0:4],crop_size=imsize) # 将yolo预测的bbox形式转换为ava数据集格式
             inp_boxes = torch.cat([torch.zeros(inp_boxes.shape[0],1), inp_boxes], dim=1)
             if isinstance(inputs, list):
                 inputs = [inp.unsqueeze(0).to(device) for inp in inputs]
             else:
                 inputs = inputs.unsqueeze(0).to(device)
             with torch.no_grad():
-                slowfaster_preds = video_model(inputs, inp_boxes.to(device))
+                slowfaster_preds = video_model(inputs, inp_boxes.to(device))    # slowfast-detection输入需要同时输入yolo的bbox以视频帧
                 slowfaster_preds = slowfaster_preds.cpu()
             for tid,avalabel in zip(yolo_preds.pred[img_num//2][:,5].tolist(),np.argmax(slowfaster_preds,axis=1).tolist()):
                 id_to_ava_labels[tid]=ava_labelnames[avalabel+1]
-        save_yolopreds_tovideo(yolo_preds,id_to_ava_labels,coco_color_map,outputvideo)
+    ####################################################################################################################
+    # 保存结果
+        save_yolopreds_tovideo(yolo_preds,id_to_ava_labels,coco_color_map,outputvideo)  # 保存结果
     print("total cost: {:.3f}s, video clips length: {}s".format(time.time()-a,video.duration))
-        
     outputvideo.release()
     print('saved video to:', vide_save_path)
-    
+
     
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', type=str, default=r"D:\PythonCode\yolo_slowfast-master\demo.avi", help='test imgs folder or video or camera')
+    parser.add_argument('--input', type=str, default=r"C:\Users\Jackal\Videos\Captures\1.mp4", help='test imgs folder or video or camera')
     parser.add_argument('--output', type=str, default="output.mp4", help='folder to save result imgs, can not use input folder')
     # object detect config
-    parser.add_argument('--imsize', type=int, default=448, help='inference size (pixels)')
+    parser.add_argument('--imsize', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--conf', type=float, default=0.4, help='object confidence threshold')
     parser.add_argument('--iou', type=float, default=0.4, help='IOU threshold for NMS')
     parser.add_argument('--device', default='cuda', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
